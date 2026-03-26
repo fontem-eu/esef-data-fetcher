@@ -187,6 +187,110 @@ def test_empty_facts_returns_all_none():
     assert all(v is None for v in s.values())
 
 
+# ---------------------------------------------------------------------------
+# Fallback concepts added for broader EU coverage
+# ---------------------------------------------------------------------------
+
+def test_capex_fallback_payments_for_ppe():
+    """ifrs-full:PaymentsForPropertyPlantAndEquipment → capex (negated)."""
+    facts = _make_facts([
+        ("ifrs-full:PaymentsForPropertyPlantAndEquipment", DURATION, "700000000"),
+        ("ifrs-full:CashFlowsFromUsedInOperatingActivities", DURATION, "2000000000"),
+    ])
+    s = extract_summary(facts, FILING_END)
+    assert s["capex"] == -700_000_000.0
+    assert s["free_cashflow"] == pytest.approx(1_300_000_000.0)
+
+
+def test_capex_fallback_ppe_and_intangibles():
+    """ifrs-full:PurchaseOfPropertyPlantAndEquipmentAndIntangibleAssets → capex (negated)."""
+    facts = _make_facts([
+        ("ifrs-full:PurchaseOfPropertyPlantAndEquipmentAndIntangibleAssets", DURATION, "900000000"),
+    ])
+    s = extract_summary(facts, FILING_END)
+    assert s["capex"] == -900_000_000.0
+
+
+def test_capex_fallback_investing_cf_negative():
+    """CashFlowsFromUsedInInvestingActivities (negative) is used as last-resort capex."""
+    facts = _make_facts([
+        ("ifrs-full:CashFlowsFromUsedInInvestingActivities", DURATION, "-1017000000"),
+        ("ifrs-full:CashFlowsFromUsedInOperatingActivities", DURATION, "2527000000"),
+    ])
+    s = extract_summary(facts, FILING_END)
+    # Investing CF is already negative — stored as-is
+    assert s["capex"] == pytest.approx(-1_017_000_000.0)
+    assert s["free_cashflow"] == pytest.approx(2_527_000_000.0 + (-1_017_000_000.0))
+
+
+def test_capex_fallback_investing_cf_positive_not_used():
+    """Positive CashFlowsFromUsedInInvestingActivities (bank-like) must NOT become capex."""
+    facts = _make_facts([
+        ("ifrs-full:CashFlowsFromUsedInInvestingActivities", DURATION, "7304000000"),
+    ])
+    s = extract_summary(facts, FILING_END)
+    assert s["capex"] is None
+    assert s["free_cashflow"] is None
+
+
+def test_capex_specific_tag_preferred_over_investing_cf():
+    """A specific PPE tag must win over the total investing-CF fallback."""
+    facts = _make_facts([
+        ("ifrs-full:PurchaseOfPropertyPlantAndEquipment", DURATION, "400000000"),
+        ("ifrs-full:CashFlowsFromUsedInInvestingActivities", DURATION, "-1500000000"),
+    ])
+    s = extract_summary(facts, FILING_END)
+    # Specific tag takes priority; result is negated specific tag, not the investing CF
+    assert s["capex"] == -400_000_000.0
+
+
+def test_income_tax_fallback_current_tax_expense():
+    """ifrs-full:CurrentTaxExpenseIncome → income_tax_expense fallback."""
+    facts = _make_facts([
+        ("ifrs-full:CurrentTaxExpenseIncome", DURATION, "280000000"),
+    ])
+    s = extract_summary(facts, FILING_END)
+    assert s["income_tax_expense"] == 280_000_000.0
+
+
+def test_da_fallback_ppe_specific():
+    """AdjustmentsForDepreciationAmortisationAndImpairmentLossOfPropertyPlantAndEquipment → D&A."""
+    facts = _make_facts([
+        ("ifrs-full:AdjustmentsForDepreciationAmortisationAndImpairmentLossOfPropertyPlantAndEquipment",
+         DURATION, "550000000"),
+    ])
+    s = extract_summary(facts, FILING_END)
+    assert s["depreciation_amortization"] == 550_000_000.0
+
+
+def test_operating_income_fallback_profit_before_tax():
+    """ifrs-full:ProfitBeforeTax → operating_income when EBIT concepts absent."""
+    facts = _make_facts([
+        ("ifrs-full:ProfitBeforeTax", DURATION, "1800000000"),
+    ])
+    s = extract_summary(facts, FILING_END)
+    assert s["operating_income"] == 1_800_000_000.0
+
+
+def test_operating_income_fallback_profit_loss_before_income_tax():
+    """ifrs-full:ProfitLossBeforeIncomeTax → operating_income fallback."""
+    facts = _make_facts([
+        ("ifrs-full:ProfitLossBeforeIncomeTax", DURATION, "2100000000"),
+    ])
+    s = extract_summary(facts, FILING_END)
+    assert s["operating_income"] == 2_100_000_000.0
+
+
+def test_operating_income_preferred_over_profit_before_tax():
+    """ProfitLossFromOperatingActivities must win over ProfitBeforeTax."""
+    facts = _make_facts([
+        ("ifrs-full:ProfitLossFromOperatingActivities", DURATION, "2000000000"),
+        ("ifrs-full:ProfitBeforeTax", DURATION, "1700000000"),  # lower because finance costs
+    ])
+    s = extract_summary(facts, FILING_END)
+    assert s["operating_income"] == 2_000_000_000.0
+
+
 def test_non_december_fiscal_year():
     """March 31 fiscal year end should correctly match its period strings."""
     mar_end = date(2023, 3, 31)

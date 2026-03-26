@@ -34,6 +34,9 @@ DURATION_CONCEPTS: dict[str, list[str]] = {
         "ifrs-full:ProfitLossFromOperatingActivities",
         "ifrs-full:OperatingProfit",
         "ifrs-full:ProfitLossBeforeFinancingCostsAndIncomeTax",
+        # Pre-tax income: includes finance costs but widely available as a fallback
+        "ifrs-full:ProfitLossBeforeIncomeTax",
+        "ifrs-full:ProfitBeforeTax",
     ],
     "net_income": [
         "ifrs-full:ProfitLossAttributableToOwnersOfParent",
@@ -47,9 +50,16 @@ DURATION_CONCEPTS: dict[str, list[str]] = {
         "ifrs-full:CashFlowsFromUsedInOperatingActivities",
     ],
     "capex": [
+        # Most specific: individual PPE cash outflow concepts (positive sign in IFRS)
         "ifrs-full:PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities",
         "ifrs-full:AcquisitionOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities",
         "ifrs-full:PurchaseOfPropertyPlantAndEquipment",
+        "ifrs-full:PaymentsForPropertyPlantAndEquipment",
+        # Combined PPE + intangibles (some companies don't split the two)
+        "ifrs-full:PurchaseOfPropertyPlantAndEquipmentAndIntangibleAssets",
+        "ifrs-full:PurchaseOfPropertyPlantAndEquipmentIntangibleAssetsAndOtherLongtermAssets",
+        # Intangibles-only fallback (telecom / software-heavy companies)
+        "ifrs-full:PurchaseOfIntangibleAssetsClassifiedAsInvestingActivities",
     ],
     "interest_expense": [
         "ifrs-full:FinanceCosts",
@@ -58,11 +68,16 @@ DURATION_CONCEPTS: dict[str, list[str]] = {
     "income_tax_expense": [
         "ifrs-full:IncomeTaxExpenseContinuingOperations",
         "ifrs-full:IncomeTaxExpense",
+        # Current-period portion only (some filers don't aggregate continuing + deferred)
+        "ifrs-full:CurrentTaxExpenseIncome",
     ],
     "depreciation_amortization": [
         "ifrs-full:DepreciationAndAmortisationExpense",
         "ifrs-full:DepreciationAmortisationAndImpairmentLossReversalOfImpairmentLossRecognisedInProfitOrLoss",
         "ifrs-full:AdjustmentsForDepreciationAndAmortisationExpense",
+        # PPE-specific D&A (used when total D&A concept is absent)
+        "ifrs-full:AdjustmentsForDepreciationAmortisationAndImpairmentLossOfPropertyPlantAndEquipment",
+        "ifrs-full:AdjustmentsForDepreciationAndAmortisationExpenseAndImpairmentLossesReversalsOfImpairmentLosses",
     ],
     "shares_outstanding": [
         "ifrs-full:WeightedAverageNumberOfSharesOutstandingBasic",
@@ -201,9 +216,17 @@ def extract_summary(facts: dict[str, Any], filing_end_date: date) -> dict[str, f
         shares = _pick(inst, INSTANT_CONCEPTS["shares_outstanding_instant"])
 
     capex_raw = _pick(dur, DURATION_CONCEPTS["capex"])
-    # CapEx is reported as positive in IFRS investing activities (outflow)
-    # We store it as negative to match us-gaap convention (net outflow)
-    capex = -abs(capex_raw) if capex_raw is not None else None
+    if capex_raw is not None:
+        # Standard PPE-purchase concepts are reported as positive outflows in IFRS
+        # investing activities; negate to match the "negative = outflow" convention.
+        capex = -abs(capex_raw)
+    else:
+        # Last resort: use total investing activities cash flow, but only when it is
+        # a net outflow (negative value).  A positive value means net investing
+        # inflows (common for banks whose core business IS investing) and should not
+        # be treated as CapEx.
+        inv_cf = dur.get("ifrs-full:CashFlowsFromUsedInInvestingActivities")
+        capex = inv_cf if (inv_cf is not None and inv_cf < 0) else None
 
     op_cf = _pick(dur, DURATION_CONCEPTS["operating_cashflow"])
     free_cashflow = (op_cf + capex) if (op_cf is not None and capex is not None) else None
