@@ -48,12 +48,22 @@ def parse_args() -> argparse.Namespace:
 
 def upload(output_dir: Path, nfs_host: str, nfs_path: str) -> None:
     console.print(f"\n[bold]Uploading {output_dir} → {nfs_host}:{nfs_path}[/bold]")
-    cmd = [
-        "rsync", "-avz", "--delete",
-        str(output_dir) + "/",
-        f"{nfs_host}:{nfs_path}/",
-    ]
-    result = subprocess.run(cmd, check=False)
+    # Ensure target directory exists, then stream a tar archive over SSH.
+    # rsync is not available in all environments; tar+ssh is universally available.
+    mk = subprocess.run(["ssh", nfs_host, f"mkdir -p {nfs_path}/summaries"], check=False)
+    if mk.returncode != 0:
+        console.print("[red]Upload failed — could not create remote directory[/red]")
+        sys.exit(1)
+    with subprocess.Popen(
+        ["tar", "-C", str(output_dir), "-cf", "-", "."],
+        stdout=subprocess.PIPE,
+    ) as tar_proc:
+        result = subprocess.run(
+            ["ssh", nfs_host, f"tar -C {nfs_path} -xf -"],
+            stdin=tar_proc.stdout,
+            check=False,
+        )
+        tar_proc.stdout.close()
     if result.returncode != 0:
         console.print("[red]Upload failed — check SSH access and NFS path[/red]")
         sys.exit(1)

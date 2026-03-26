@@ -13,6 +13,8 @@ RUN useradd --create-home --shell /bin/bash appuser
 WORKDIR /app
 
 # --- Python dependencies -------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && rm requirements.txt
 
@@ -23,6 +25,6 @@ COPY src/ src/
 USER appuser
 
 # --- Runtime ------------------------------------------------------------------
-# --output-dir  must match the volume mountPath in the CronJob
-# --upload      rsync to NFS host (requires SSH key mount)
+# --output-dir  must match the volume mountPath in the CronJob.
+# --upload      streams output to NFS host via tar+ssh (requires SSH key mount).
 CMD ["python", "setup.py", "--output-dir", "/esef-output", "--max-workers", "8"]
