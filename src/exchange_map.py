@@ -7,7 +7,9 @@ that are not in the EDGAR universe.
 from __future__ import annotations
 
 import logging
+import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import requests
@@ -52,98 +54,7 @@ COUNTRY_TO_EXCHANGE: dict[str, str] = {
 }
 
 _OPENFIGI_URL = "https://api.openfigi.com/v3/mapping"
-
-
-def _openfigi_batch(
-    leis: list[str], api_key: str, timeout: int
-) -> dict[str, dict[str, str]]:
-    """
-    Call OpenFIGI for a batch of LEIs.
-    Returns {lei: {"ticker": ..., "exchange_code": ...}} for successful hits.
-    """
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["X-OPENFIGI-APIKEY"] = api_key
-
-    payload = [{"idType": "ID_LEI", "idValue": lei} for lei in leis]
-    try:
-        resp = requests.post(_OPENFIGI_URL, json=payload, headers=headers, timeout=timeout)
-        if resp.status_code == 429:
-            logger.warning("OpenFIGI rate-limited — sleeping 60s")
-            time.sleep(60)
-            return {}
-        resp.raise_for_status()
-        results: dict[str, dict[str, str]] = {}
-        for lei, item in zip(leis, resp.json()):
-            data = item.get("data")
-            if not data:
-                continue
-            # Prefer equity instruments on a recognized exchange
-            for entry in data:
-                if entry.get("securityType") in ("Common Stock", "ETP", "Ordinary Shares"):
-                    ticker = entry.get("ticker")
-                    exch = entry.get("exchCode") or entry.get("marketSector")
-                    if ticker:
-                        results[lei] = {"ticker": ticker, "exchange_code": exch or ""}
-                        break
-        return results
-    except requests.RequestException as exc:
-        logger.warning("OpenFIGI request failed: %s", exc)
-        return {}
-
-
-def resolve_tickers(
-    entities: list[dict[str, Any]],
-    *,
-    use_openfigi: bool = True,
-    api_key: str = "",
-    batch_size: int = 10,
-    timeout: int = 30,
-) -> dict[str, dict[str, str]]:
-    """
-    For each entity (with 'lei' and 'country'), resolve:
-      - ticker symbol (from OpenFIGI or name-derived)
-      - exchange suffix (from OpenFIGI or country map)
-
-    Returns {lei: {"symbol": ..., "exchange": ..., "ticker": ...}}
-    where ticker = f"{symbol}.{exchange}".
-    """
-    result: dict[str, dict[str, str]] = {}
-    figi_map: dict[str, dict[str, str]] = {}
-
-    if use_openfigi:
-        leis = [e["lei"] for e in entities]
-        for i in range(0, len(leis), batch_size):
-            chunk = leis[i : i + batch_size]
-            hits = _openfigi_batch(chunk, api_key, timeout)
-            figi_map.update(hits)
-            # Respect free-tier rate limit (max 25 req/min without key)
-            if not api_key:
-                time.sleep(2.5)
-
-    for entity in entities:
-        lei = entity["lei"]
-        country = entity.get("country", "")
-        name = entity.get("name", "")
-
-        figi = figi_map.get(lei, {})
-        if figi.get("ticker"):
-            symbol = figi["ticker"].upper().replace(" ", "")
-            # OpenFIGI exchCode (e.g. "AS", "GY") — map common aliases
-            exchange = _normalize_exchange(figi.get("exchange_code", ""), country)
-        else:
-            symbol = _name_to_symbol(name)
-            exchange = COUNTRY_TO_EXCHANGE.get(country, "ESEF")
-
-        ticker = f"{symbol}.{exchange}"
-        result[lei] = {"symbol": symbol, "exchange": exchange, "ticker": ticker}
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+_GLEIF_ISIN_URL = "https://api.gleif.org/api/v1/lei-records/{lei}/isins"
 
 # OpenFIGI exchCode → our suffix (only differs in a few cases)
 _EXCH_ALIASES: dict[str, str] = {
@@ -164,8 +75,272 @@ _EXCH_ALIASES: dict[str, str] = {
     "PL": "LS",   # Lisbon
 }
 
+_EQUITY_TYPES = ("Common Stock", "ETP", "Ordinary Shares")
+
+
+_GLEIF_RETRY_DELAYS = (2, 5, 15)  # seconds between retries on 429
+
+
+def _gleif_fetch_one(lei: str, timeout: int) -> tuple[str, list[str]]:
+    """Fetch all ISINs for a single LEI from the GLEIF API.
+
+    Retries up to 3 times on HTTP 429 (rate-limit) with increasing delays.
+    Returns (lei, [isin, ...]) — empty list if none found or on error.
+    """
+    url = _GLEIF_ISIN_URL.format(lei=lei)
+    for attempt, delay in enumerate((*_GLEIF_RETRY_DELAYS, None)):
+        try:
+            resp = requests.get(url, timeout=timeout)
+            if resp.status_code == 404:
+                return lei, []
+            if resp.status_code == 429:
+                if delay is not None:
+                    logger.debug("GLEIF rate-limited for %s — retrying in %ds", lei, delay)
+                    time.sleep(delay)
+                    continue
+                logger.warning(
+                    "GLEIF rate-limit exceeded for LEI %s after %d attempts", lei, attempt
+                )
+                return lei, []
+            resp.raise_for_status()
+            items = resp.json().get("data", [])
+            isins = [
+                item["attributes"]["isin"]
+                for item in items
+                if item.get("attributes", {}).get("isin")
+            ]
+            return lei, isins
+        except (requests.RequestException, KeyError) as exc:
+            logger.warning("GLEIF request failed for LEI %s: %s", lei, exc)
+            return lei, []
+    return lei, []  # exhausted retries
+
+
+def _gleif_get_isins(
+    leis: list[str],
+    *,
+    max_workers: int = 5,
+    timeout: int = 10,
+) -> dict[str, str | None]:
+    """
+    Fetch the primary ISIN for each LEI from the GLEIF API in parallel.
+
+    When multiple ISINs are returned by GLEIF, the first one is stored here;
+    all ISINs are handled internally by ``resolve_tickers`` via
+    ``_gleif_get_all_isins``.
+
+    Returns {lei: isin_or_None}.
+    """
+    all_isins = _gleif_get_all_isins(leis, max_workers=max_workers, timeout=timeout)
+    return {lei: (isins[0] if isins else None) for lei, isins in all_isins.items()}
+
+
+def _gleif_get_all_isins(
+    leis: list[str],
+    *,
+    max_workers: int = 5,
+    timeout: int = 10,
+) -> dict[str, list[str]]:
+    """
+    Fetch all ISINs for each LEI from the GLEIF API in parallel.
+
+    Returns {lei: [isin, ...]} — values may be empty lists.
+    """
+    result: dict[str, list[str]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_gleif_fetch_one, lei, timeout): lei for lei in leis}
+        for future in as_completed(futures):
+            lei_result, isins = future.result()
+            result[lei_result] = isins
+    return result
+
+
+def _pick_best_entry(entries: list[dict], preferred_exchange: str) -> dict | None:
+    """
+    From a list of OpenFIGI entries, pick the best equity entry.
+
+    Prefers the entry whose exchCode (normalized via _EXCH_ALIASES) matches
+    ``preferred_exchange``. Falls back to the first equity entry.
+    """
+    common_stocks = [e for e in entries if e.get("securityType") in _EQUITY_TYPES]
+    if not common_stocks:
+        return None
+    for entry in common_stocks:
+        exch_code = entry.get("exchCode", "")
+        normalized = _EXCH_ALIASES.get(exch_code.upper(), exch_code.upper())
+        if normalized == preferred_exchange:
+            return entry
+    return common_stocks[0]
+
+
+def _openfigi_by_isin(
+    isin_country_pairs: list[tuple[str, str]],
+    api_key: str,
+    timeout: int,
+) -> dict[str, dict[str, str]]:
+    """
+    Look up tickers from OpenFIGI using ISIN identifiers.
+
+    ``isin_country_pairs`` is a list of (isin, country_code) tuples.
+
+    For each ISIN result, prefers the ``Common Stock`` entry whose exchCode
+    (normalized via ``_EXCH_ALIASES``) matches ``COUNTRY_TO_EXCHANGE[country]``.
+    If no country match is found, takes the first ``Common Stock`` entry.
+
+    Returns {isin: {"ticker": ..., "exchange_code": ...}}.
+    """
+    if not isin_country_pairs:
+        return {}
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-OPENFIGI-APIKEY"] = api_key
+
+    payload = [{"idType": "ID_ISIN", "idValue": isin} for isin, _ in isin_country_pairs]
+    try:
+        resp = requests.post(_OPENFIGI_URL, json=payload, headers=headers, timeout=timeout)
+        if resp.status_code == 429:
+            logger.warning("OpenFIGI rate-limited — sleeping 60s")
+            time.sleep(60)
+            return {}
+        resp.raise_for_status()
+        return _parse_openfigi_response(isin_country_pairs, resp.json())
+    except requests.RequestException as exc:
+        logger.warning("OpenFIGI request failed: %s", exc)
+        return {}
+
+
+def _parse_openfigi_response(
+    isin_country_pairs: list[tuple[str, str]],
+    response_data: list[dict],
+) -> dict[str, dict[str, str]]:
+    """Parse the raw OpenFIGI response into an {isin: figi_info} mapping."""
+    results: dict[str, dict[str, str]] = {}
+    for (isin, country), item in zip(isin_country_pairs, response_data):
+        data = item.get("data")
+        if not data:
+            continue
+        preferred_exchange = COUNTRY_TO_EXCHANGE.get(country, "")
+        chosen = _pick_best_entry(data, preferred_exchange)
+        if chosen is None:
+            continue
+        ticker = chosen.get("ticker")
+        exch = chosen.get("exchCode") or chosen.get("marketSector")
+        if ticker:
+            results[isin] = {"ticker": ticker, "exchange_code": exch or ""}
+    return results
+
+
+_MAX_ISINS_PER_ENTITY = 4
+
+
+def _build_isin_pairs(
+    entities: list[dict[str, Any]],
+    lei_to_isins: dict[str, list[str]],
+) -> list[tuple[str, str]]:
+    """Build deduplicated (isin, country) pairs from the entity list.
+
+    Country-matching ISINs (e.g. NL* for NL entities) are placed first so
+    ``_best_figi_for_lei`` finds the domestic equity listing before ADRs or
+    bond ISINs.  At most ``_MAX_ISINS_PER_ENTITY`` ISINs are kept per entity
+    to avoid flooding OpenFIGI with bond ISINs.
+    """
+    seen: set[str] = set()
+    deduped: list[tuple[str, str]] = []
+    for entity in entities:
+        country = entity.get("country", "")
+        isins = lei_to_isins.get(entity["lei"], [])
+        # Domestic equity ISINs first, then others
+        ordered = [i for i in isins if i.startswith(country)] + \
+                  [i for i in isins if not i.startswith(country)]
+        for isin in ordered[:_MAX_ISINS_PER_ENTITY]:
+            if isin not in seen:
+                seen.add(isin)
+                deduped.append((isin, country))
+    return deduped
+
+
+def _best_figi_for_lei(
+    isins: list[str],
+    isin_to_figi: dict[str, dict[str, str]],
+) -> dict[str, str]:
+    """Return the first OpenFIGI hit for any of the entity's ISINs."""
+    for isin in isins:
+        figi = isin_to_figi.get(isin)
+        if figi:
+            return figi
+    return {}
+
+
+def resolve_tickers(  # pylint: disable=too-many-arguments
+    entities: list[dict[str, Any]],
+    *,
+    use_openfigi: bool = True,
+    api_key: str = "",
+    batch_size: int = 10,
+    timeout: int = 30,
+    gleif_workers: int = 5,
+) -> dict[str, dict[str, str]]:
+    """
+    For each entity (with 'lei' and 'country'), resolve:
+      - ticker symbol (from OpenFIGI or name-derived)
+      - exchange suffix (from OpenFIGI or country map)
+
+    Returns {lei: {"symbol": ..., "exchange": ..., "ticker": ...}}
+    where ticker = f"{symbol}.{exchange}".
+    """
+    isin_to_figi: dict[str, dict[str, str]] = {}
+    lei_to_isins: dict[str, list[str]] = {}
+
+    if use_openfigi:
+        leis = [e["lei"] for e in entities]
+        lei_to_isins = _gleif_get_all_isins(
+            leis, max_workers=gleif_workers, timeout=timeout
+        )
+        deduped = _build_isin_pairs(entities, lei_to_isins)
+        for i in range(0, len(deduped), batch_size):
+            chunk = deduped[i: i + batch_size]
+            isin_to_figi.update(_openfigi_by_isin(chunk, api_key, timeout))
+            if not api_key:
+                time.sleep(2.5)
+
+    return _build_result(entities, lei_to_isins, isin_to_figi)
+
+
+def _build_result(
+    entities: list[dict[str, Any]],
+    lei_to_isins: dict[str, list[str]],
+    isin_to_figi: dict[str, dict[str, str]],
+) -> dict[str, dict[str, str]]:
+    """Assemble the final {lei: {symbol, exchange, ticker}} result dict."""
+    result: dict[str, dict[str, str]] = {}
+    for entity in entities:
+        lei = entity["lei"]
+        country = entity.get("country", "")
+        name = entity.get("name", "")
+
+        isins = lei_to_isins.get(lei, [])
+        figi = _best_figi_for_lei(isins, isin_to_figi)
+
+        if figi.get("ticker"):
+            symbol = figi["ticker"].upper().replace(" ", "")
+            exchange = _normalize_exchange(figi.get("exchange_code", ""), country)
+        else:
+            symbol = _name_to_symbol(name)
+            exchange = COUNTRY_TO_EXCHANGE.get(country, "ESEF")
+
+        ticker = f"{symbol}.{exchange}"
+        result[lei] = {"symbol": symbol, "exchange": exchange, "ticker": ticker}
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 
 def _normalize_exchange(openfigi_code: str, country: str) -> str:
+    """Map an OpenFIGI exchCode to our Yahoo Finance suffix."""
     if not openfigi_code:
         return COUNTRY_TO_EXCHANGE.get(country, "ESEF")
     return _EXCH_ALIASES.get(openfigi_code.upper(), openfigi_code.upper())
@@ -173,8 +348,6 @@ def _normalize_exchange(openfigi_code: str, country: str) -> str:
 
 def _name_to_symbol(name: str) -> str:
     """Derive a short symbol from a company legal name."""
-    import re
-    # Strip legal suffixes
     clean = re.sub(
         r"\b(N\.?V\.?|S\.?A\.?|AG|PLC|Ltd\.?|LLC|GmbH|SE|BV|AB|ASA|OYJ|A/S)\b",
         "",
