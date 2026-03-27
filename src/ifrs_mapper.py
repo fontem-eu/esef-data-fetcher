@@ -73,11 +73,16 @@ DURATION_CONCEPTS: dict[str, list[str]] = {
     ],
     "depreciation_amortization": [
         "ifrs-full:DepreciationAndAmortisationExpense",
-        "ifrs-full:DepreciationAmortisationAndImpairmentLossReversalOfImpairmentLossRecognisedInProfitOrLoss",
+        # fmt: off
+        "ifrs-full:DepreciationAmortisationAndImpairmentLossReversalOfImpairmentLoss"
+        "RecognisedInProfitOrLoss",
+        # fmt: on
         "ifrs-full:AdjustmentsForDepreciationAndAmortisationExpense",
         # PPE-specific D&A (used when total D&A concept is absent)
-        "ifrs-full:AdjustmentsForDepreciationAmortisationAndImpairmentLossOfPropertyPlantAndEquipment",
-        "ifrs-full:AdjustmentsForDepreciationAndAmortisationExpenseAndImpairmentLossesReversalsOfImpairmentLosses",
+        "ifrs-full:AdjustmentsForDepreciationAmortisationAndImpairmentLoss"
+        "OfPropertyPlantAndEquipment",
+        "ifrs-full:AdjustmentsForDepreciationAndAmortisationExpenseAndImpairment"
+        "LossesReversalsOfImpairmentLosses",
     ],
     "shares_outstanding": [
         "ifrs-full:WeightedAverageNumberOfSharesOutstandingBasic",
@@ -133,7 +138,7 @@ def _period_end_str(filing_end: date) -> str:
     return nxt.strftime("%Y-%m-%dT00:00:00")
 
 
-def _parse_value(raw: str | None, is_share_count: bool = False) -> float | None:
+def _parse_value(raw: str | None, is_share_count: bool = False) -> float | None:  # pylint: disable=unused-argument
     """Parse a string numeric value to float, return None on failure."""
     if raw is None:
         return None

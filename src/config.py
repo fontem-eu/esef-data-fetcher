@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 @dataclass
-class Config:
+class Config:  # pylint: disable=too-many-instance-attributes
     """All tuneable parameters in one place."""
 
     # Where to write output locally before uploading

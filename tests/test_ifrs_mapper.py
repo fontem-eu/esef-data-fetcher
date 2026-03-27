@@ -33,10 +33,12 @@ def _make_facts(items: list[tuple[str, str, str]]) -> dict:
 # ---------------------------------------------------------------------------
 
 def test_period_end_str_dec31():
+    """December 31 maps to January 1 the following year."""
     assert _period_end_str(date(2022, 12, 31)) == "2023-01-01T00:00:00"
 
 
 def test_period_end_str_mar31():
+    """March 31 maps to April 1 the same year."""
     assert _period_end_str(date(2023, 3, 31)) == "2023-04-01T00:00:00"
 
 
@@ -50,8 +52,9 @@ PERIOD_START = "2022-01-01T00:00:00"
 DURATION = f"{PERIOD_START}/{PERIOD_END}"
 
 
-@pytest.fixture
-def full_facts():
+@pytest.fixture(name="full_facts")
+def fixture_full_facts():
+    """A complete set of IFRS facts covering all supported concepts."""
     return _make_facts([
         ("ifrs-full:Revenue",                              DURATION, "10000000000"),
         ("ifrs-full:GrossProfit",                          DURATION, "4000000000"),
@@ -78,21 +81,25 @@ def full_facts():
 
 
 def test_extract_revenue(full_facts):
+    """Revenue is extracted correctly from IFRS facts."""
     s = extract_summary(full_facts, FILING_END)
     assert s["revenue"] == 10_000_000_000.0
 
 
 def test_extract_gross_profit(full_facts):
+    """Gross profit is extracted correctly from IFRS facts."""
     s = extract_summary(full_facts, FILING_END)
     assert s["gross_profit"] == 4_000_000_000.0
 
 
 def test_extract_net_income(full_facts):
+    """Net income attributable to owners is extracted correctly."""
     s = extract_summary(full_facts, FILING_END)
     assert s["net_income"] == 1_500_000_000.0
 
 
 def test_extract_eps(full_facts):
+    """Earnings per share is extracted and approximately correct."""
     s = extract_summary(full_facts, FILING_END)
     assert s["eps"] == pytest.approx(3.75)
 
@@ -104,12 +111,14 @@ def test_extract_capex_is_negative(full_facts):
 
 
 def test_extract_free_cashflow_derived(full_facts):
+    """Free cash flow is derived as operating CF + capex."""
     s = extract_summary(full_facts, FILING_END)
     # 2_200_000_000 + (-500_000_000)
     assert s["free_cashflow"] == pytest.approx(1_700_000_000.0)
 
 
 def test_extract_balance_sheet(full_facts):
+    """All balance sheet items are extracted correctly."""
     s = extract_summary(full_facts, FILING_END)
     assert s["total_assets"] == 20_000_000_000.0
     assert s["total_liabilities"] == 8_000_000_000.0
@@ -122,6 +131,7 @@ def test_extract_balance_sheet(full_facts):
 
 
 def test_extract_shares(full_facts):
+    """Shares outstanding is extracted from weighted average shares."""
     s = extract_summary(full_facts, FILING_END)
     assert s["shares_outstanding"] == 400_000_000.0
 
@@ -131,6 +141,7 @@ def test_extract_shares(full_facts):
 # ---------------------------------------------------------------------------
 
 def test_missing_gross_profit_returns_none():
+    """Missing gross profit concept returns None without affecting other fields."""
     facts = _make_facts([
         ("ifrs-full:Revenue", DURATION, "5000000000"),
     ])
@@ -183,6 +194,7 @@ def test_shares_fallback_to_instant():
 
 
 def test_empty_facts_returns_all_none():
+    """Empty facts dict results in all summary values being None."""
     s = extract_summary({}, FILING_END)
     assert all(v is None for v in s.values())
 
@@ -255,10 +267,11 @@ def test_income_tax_fallback_current_tax_expense():
 
 def test_da_fallback_ppe_specific():
     """AdjustmentsForDepreciationAmortisationAndImpairmentLossOfPropertyPlantAndEquipment → D&A."""
-    facts = _make_facts([
-        ("ifrs-full:AdjustmentsForDepreciationAmortisationAndImpairmentLossOfPropertyPlantAndEquipment",
-         DURATION, "550000000"),
-    ])
+    ppe_da_concept = (
+        "ifrs-full:AdjustmentsForDepreciationAmortisationAndImpairment"
+        "LossOfPropertyPlantAndEquipment"
+    )
+    facts = _make_facts([(ppe_da_concept, DURATION, "550000000")])
     s = extract_summary(facts, FILING_END)
     assert s["depreciation_amortization"] == 550_000_000.0
 

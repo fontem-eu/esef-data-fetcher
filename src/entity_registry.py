@@ -20,7 +20,7 @@ from .exchange_map import resolve_tickers
 logger = logging.getLogger(__name__)
 
 
-def build_registry(cfg: Config) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
+def build_registry(cfg: Config) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:  # pylint: disable=too-many-locals
     """
     Fetch all ESEF/UKSEF filings from filings.xbrl.org in one bulk request,
     resolve tickers, and return:

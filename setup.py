@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
+    """Build and parse CLI arguments."""
     p = argparse.ArgumentParser(description="ESEF financial summary fetcher")
     p.add_argument("--output-dir", default=None, help="Output directory (default: esef-output/)")
     p.add_argument("--no-openfigi", action="store_true", help="Skip OpenFIGI ticker lookup")
@@ -47,6 +48,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def upload(output_dir: Path, nfs_host: str, nfs_path: str) -> None:
+    """Stream the output directory to the NFS host via tar+SSH."""
     console.print(f"\n[bold]Uploading {output_dir} → {nfs_host}:{nfs_path}[/bold]")
     # Ensure target directory exists, then stream a tar archive over SSH.
     # rsync is not available in all environments; tar+ssh is universally available.
@@ -70,9 +72,8 @@ def upload(output_dir: Path, nfs_host: str, nfs_path: str) -> None:
     console.print("[green]Upload complete.[/green]")
 
 
-def main() -> None:
-    args = parse_args()
-    cfg = Config()
+def _apply_args(cfg: Config, args: argparse.Namespace) -> None:
+    """Apply CLI overrides to the config object."""
     if args.output_dir:
         cfg.output_dir = Path(args.output_dir)
     if args.no_openfigi:
@@ -80,23 +81,16 @@ def main() -> None:
     if args.max_workers:
         cfg.max_workers = args.max_workers
 
-    start = time.monotonic()
-    console.print("[bold cyan]ESEF Data Fetcher[/bold cyan]")
-    console.print(f"  Output dir : {cfg.output_dir}")
-    console.print(f"  OpenFIGI   : {cfg.use_openfigi}")
-    console.print(f"  Workers    : {cfg.max_workers}")
 
-    # ── Step 1: Build entity registry ───────────────────────────────────────
-    console.print("\n[bold]Step 1/3 — Building entity registry…[/bold]")
-    registry, filing_urls = build_registry(cfg)
-    write_registry(registry, cfg.output_dir)
-    console.print(f"  [green]✓[/green] {len(registry)} entities in registry")
+def _fetch_summaries(
+    registry: dict,
+    filing_urls: dict,
+    cfg: Config,
+) -> tuple[int, int, int]:
+    """Fetch financial summaries for all entities in parallel.
 
-    # Build a LEI → ticker reverse map for the fetch step
-    lei_to_ticker = {meta["lei"]: ticker for ticker, meta in registry.items()}
-
-    # ── Step 2: Fetch financial summaries ───────────────────────────────────
-    console.print("\n[bold]Step 2/3 — Fetching financial summaries…[/bold]")
+    Returns (fetched, skipped, errors) counts.
+    """
     fetched = skipped = errors = 0
     tickers = list(registry.keys())
 
@@ -140,6 +134,31 @@ def main() -> None:
                     write_summary(ticker, registry[ticker], filings, cfg.output_dir)
                 progress.advance(task)
 
+    return fetched, skipped, errors
+
+
+def main() -> None:
+    """Entry point: build registry, fetch summaries, optionally upload."""
+    args = parse_args()
+    cfg = Config()
+    _apply_args(cfg, args)
+
+    start = time.monotonic()
+    console.print("[bold cyan]ESEF Data Fetcher[/bold cyan]")
+    console.print(f"  Output dir : {cfg.output_dir}")
+    console.print(f"  OpenFIGI   : {cfg.use_openfigi}")
+    console.print(f"  Workers    : {cfg.max_workers}")
+
+    # ── Step 1: Build entity registry ───────────────────────────────────────
+    console.print("\n[bold]Step 1/3 — Building entity registry…[/bold]")
+    registry, filing_urls = build_registry(cfg)
+    write_registry(registry, cfg.output_dir)
+    console.print(f"  [green]✓[/green] {len(registry)} entities in registry")
+
+    # ── Step 2: Fetch financial summaries ───────────────────────────────────
+    console.print("\n[bold]Step 2/3 — Fetching financial summaries…[/bold]")
+    fetched, skipped, errors = _fetch_summaries(registry, filing_urls, cfg)
+
     elapsed = time.monotonic() - start
     write_metadata(
         cfg.output_dir,
@@ -149,8 +168,7 @@ def main() -> None:
         errors=errors,
         elapsed_seconds=elapsed,
     )
-
-    console.print(f"\n[bold]Step 2/3 done[/bold]")
+    console.print("\n[bold]Step 2/3 done[/bold]")
     console.print(f"  fetched={fetched}  skipped={skipped}  errors={errors}  elapsed={elapsed:.0f}s")
 
     # ── Step 3: Upload ───────────────────────────────────────────────────────
@@ -158,7 +176,10 @@ def main() -> None:
         console.print("\n[bold]Step 3/3 — Uploading to NFS…[/bold]")
         upload(cfg.output_dir, cfg.nfs_host, cfg.nfs_path)
     else:
-        console.print(f"\n[dim]Step 3/3 — Skipped (run with --upload to push to {cfg.nfs_host}:{cfg.nfs_path})[/dim]")
+        console.print(
+            f"\n[dim]Step 3/3 — Skipped (run with --upload to push to "
+            f"{cfg.nfs_host}:{cfg.nfs_path})[/dim]"
+        )
 
     console.print(f"\n[bold green]Done in {elapsed:.0f}s[/bold green]")
 

@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 def write_registry(registry: dict[str, Any], output_dir: Path) -> None:
+    """Serialise the entity registry to ``eu_entities.json`` inside *output_dir*."""
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "eu_entities.json"
     path.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -18,13 +19,20 @@ def write_registry(registry: dict[str, Any], output_dir: Path) -> None:
 
 
 def read_registry(output_dir: Path) -> dict[str, Any]:
+    """Load the entity registry from *output_dir*, returning ``{}`` if absent."""
     path = output_dir / "eu_entities.json"
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def write_summary(ticker: str, entity_meta: dict[str, Any], filings: list[dict[str, Any]], output_dir: Path) -> None:
+def write_summary(  # pylint: disable=too-many-arguments
+    ticker: str,
+    entity_meta: dict[str, Any],
+    filings: list[dict[str, Any]],
+    output_dir: Path,
+) -> None:
+    """Write a per-entity filing summary JSON to *output_dir*/summaries/."""
     summaries_dir = output_dir / "summaries"
     summaries_dir.mkdir(parents=True, exist_ok=True)
     doc = {
@@ -37,7 +45,7 @@ def write_summary(ticker: str, entity_meta: dict[str, Any], filings: list[dict[s
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def write_metadata(
+def write_metadata(  # pylint: disable=too-many-arguments
     output_dir: Path,
     *,
     total_entities: int,
@@ -46,6 +54,7 @@ def write_metadata(
     errors: int,
     elapsed_seconds: float,
 ) -> None:
+    """Write a run-level metadata JSON to *output_dir*/metadata.json."""
     path = output_dir / "metadata.json"
     path.write_text(
         json.dumps(
