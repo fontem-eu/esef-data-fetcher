@@ -138,7 +138,7 @@ def _period_end_str(filing_end: date) -> str:
     return nxt.strftime("%Y-%m-%dT00:00:00")
 
 
-def _parse_value(raw: str | None, is_share_count: bool = False) -> float | None:  # pylint: disable=unused-argument
+def _parse_value(raw: str | None, _is_share_count: bool = False) -> float | None:
     """Parse a string numeric value to float, return None on failure."""
     if raw is None:
         return None
