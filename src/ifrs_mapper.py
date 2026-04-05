@@ -144,7 +144,7 @@ def _parse_value(raw: str | None, is_share_count: bool = False) -> float | None:
         return None
     try:
         val = float(raw)
-        return val if val != 0.0 else None
+        return val if abs(val) >= 1e-9 else None
     except (ValueError, TypeError):
         return None
 
