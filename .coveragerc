@@ -1,0 +1,5 @@
+[run]
+omit =
+    setup.py
+    src/config.py
+    src/entity_registry.py

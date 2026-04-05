@@ -17,6 +17,7 @@ test:
 	python3 -m pytest $(TESTS) \
 		--cov=$(SRC) \
 		--cov-report=xml:coverage.xml \
+		--cov-config=.coveragerc \
 		--junitxml=test-results.xml \
 		-q
 
@@ -30,7 +31,8 @@ analyze: test
 		-Dsonar.python.xunit.reportPath=test-results.xml \
 		-Dsonar.host.url=$(SONAR_URL) \
 		-Dsonar.token=$(SONAR_TOKEN) \
-		-Dsonar.scm.provider=git
+		-Dsonar.scm.provider=git \
+		'-Dsonar.coverage.exclusions=setup.py'
 	@echo "Dashboard: $(SONAR_URL)/dashboard?id=$(PROJECT)"
 
 # ── Deploy ───────────────────────────────────────────────────
