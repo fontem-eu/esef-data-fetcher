@@ -59,14 +59,14 @@ def test_country_to_exchange_has_major_markets():
 
 
 def test_resolve_tickers_no_openfigi():
-    """Without OpenFIGI, tickers are derived from company names."""
+    """Without OpenFIGI, tickers are null (no FIGI resolution possible)."""
     entities = [
         {"lei": "LEI001", "name": "ASML Holding N.V.", "country": "NL"},
         {"lei": "LEI002", "name": "SAP SE", "country": "DE"},
     ]
     result = resolve_tickers(entities, use_openfigi=False)
-    assert result["LEI001"]["ticker"] == "ASML.AS"
-    assert result["LEI002"]["ticker"] == "SAP.DE"
+    assert result["LEI001"]["ticker"] is None
+    assert result["LEI002"]["ticker"] is None
 
 
 def test_resolve_tickers_openfigi_hit():
@@ -94,8 +94,8 @@ def test_resolve_tickers_openfigi_hit():
     assert result["LEI001"]["ticker"] == "ASML.AS"
 
 
-def test_resolve_tickers_openfigi_miss_falls_back():
-    """GLEIF returns empty data, so falls back to name-based ticker."""
+def test_resolve_tickers_openfigi_miss_returns_null():
+    """GLEIF returns empty data and FIGI has no match — ticker is null."""
     entities = [{"lei": "LEI001", "name": "Signify N.V.", "country": "NL"}]
 
     gleif_response = MagicMock()
@@ -110,8 +110,9 @@ def test_resolve_tickers_openfigi_miss_falls_back():
          patch("src.exchange_map.requests.post", return_value=openfigi_response):
         result = resolve_tickers(entities, use_openfigi=True, batch_size=10)
 
-    assert result["LEI001"]["exchange"] == "AS"
-    assert result["LEI001"]["ticker"] == "SIGNIFY.AS"
+    assert result["LEI001"]["ticker"] is None
+    assert result["LEI001"]["symbol"] is None
+    assert result["LEI001"]["exchange"] is None
 
 
 def test_gleif_returns_isin():

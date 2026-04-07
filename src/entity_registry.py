@@ -88,31 +88,41 @@ def build_registry(cfg: Config) -> tuple[dict[str, Any], dict[str, list[dict[str
     )
 
     # ── Build registry ───────────────────────────────────────────────────────
-    # Keyed by ticker; disambiguate duplicates by appending last 4 chars of LEI
+    # Keyed by ticker (or LEI for entities without a resolved ticker).
+    # Disambiguate duplicate tickers by appending last 4 chars of LEI.
     ticker_count: dict[str, int] = defaultdict(int)
     for tick_info in ticker_map.values():
-        ticker_count[tick_info["ticker"]] += 1
+        ticker = tick_info.get("ticker")
+        if ticker is not None:
+            ticker_count[ticker] += 1
 
     registry: dict[str, Any] = {}
+    resolved = 0
     for entity in entities:
         lei = entity["lei"]
         tick_info = ticker_map.get(lei, {})
-        symbol = tick_info.get("symbol", lei[:8])
-        exchange = tick_info.get("exchange", "ESEF")
-        ticker = tick_info.get("ticker", f"{symbol}.{exchange}")
+        ticker = tick_info.get("ticker")
 
-        if ticker_count[ticker] > 1:
-            ticker = f"{symbol}_{lei[-4:]}.{exchange}"
+        if ticker is not None:
+            if ticker_count[ticker] > 1:
+                symbol = tick_info["symbol"]
+                exchange = tick_info["exchange"]
+                ticker = f"{symbol}_{lei[-4:]}.{exchange}"
+            key = ticker
+            resolved += 1
+        else:
+            key = lei  # use LEI as key for unresolved entities
 
-        registry[ticker] = {
+        registry[key] = {
             "lei": lei,
             "ticker": ticker,
-            "symbol": symbol,
-            "exchange": exchange,
+            "symbol": tick_info.get("symbol"),
+            "exchange": tick_info.get("exchange"),
             "name": entity["name"],
             "country": entity["country"],
             "source": "esef",
         }
 
-    logger.info("Registry built: %d entries", len(registry))
+    logger.info("Registry built: %d entries (%d with ticker, %d without)",
+                len(registry), resolved, len(registry) - resolved)
     return registry, filing_urls

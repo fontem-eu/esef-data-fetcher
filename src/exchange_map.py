@@ -311,13 +311,18 @@ def _build_result(
     entities: list[dict[str, Any]],
     lei_to_isins: dict[str, list[str]],
     isin_to_figi: dict[str, dict[str, str]],
-) -> dict[str, dict[str, str]]:
-    """Assemble the final {lei: {symbol, exchange, ticker}} result dict."""
-    result: dict[str, dict[str, str]] = {}
+) -> dict[str, dict[str, str | None]]:
+    """Assemble the final {lei: {symbol, exchange, ticker}} result dict.
+
+    When OpenFIGI cannot resolve a ticker, symbol/exchange/ticker are set
+    to None instead of fabricating a name-derived ticker that will never
+    match a real exchange listing.
+    """
+    result: dict[str, dict[str, str | None]] = {}
+    unresolved = 0
     for entity in entities:
         lei = entity["lei"]
         country = entity.get("country", "")
-        name = entity.get("name", "")
 
         isins = lei_to_isins.get(lei, [])
         figi = _best_figi_for_lei(isins, isin_to_figi)
@@ -325,12 +330,15 @@ def _build_result(
         if figi.get("ticker"):
             symbol = figi["ticker"].upper().replace(" ", "")
             exchange = _normalize_exchange(figi.get("exchange_code", ""), country)
+            ticker = f"{symbol}.{exchange}"
+            result[lei] = {"symbol": symbol, "exchange": exchange, "ticker": ticker}
         else:
-            symbol = _name_to_symbol(name)
-            exchange = COUNTRY_TO_EXCHANGE.get(country, "ESEF")
+            unresolved += 1
+            result[lei] = {"symbol": None, "exchange": None, "ticker": None}
 
-        ticker = f"{symbol}.{exchange}"
-        result[lei] = {"symbol": symbol, "exchange": exchange, "ticker": ticker}
+    if unresolved:
+        logger.info("Ticker resolution: %d of %d entities unresolved (no FIGI match)",
+                     unresolved, len(entities))
     return result
 
 
