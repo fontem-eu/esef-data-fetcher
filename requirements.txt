@@ -3,3 +3,5 @@ brel-xbrl>=0.8.0a1
 py-xbrl>=3.0.0
 rich>=13.0.0
 requests>=2.31.0
+urllib3>=2.6.3
+certifi>=2024.7.4
