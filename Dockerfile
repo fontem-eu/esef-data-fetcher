@@ -4,7 +4,7 @@
 # Build:  docker build -t esef-data-fetcher:latest .
 # Run:    docker run -v /your/data:/esef-output esef-data-fetcher:latest
 # ──────────────────────────────────────────────────────────────────────────────
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 # --- Non-root user for security -----------------------------------------------
 # The NFS share must allow writes from UID 1000 (appuser).
