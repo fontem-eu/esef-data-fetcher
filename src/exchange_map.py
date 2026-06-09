@@ -263,13 +263,22 @@ def _build_isin_pairs(
 def _best_figi_for_lei(
     isins: list[str],
     isin_to_figi: dict[str, dict[str, str]],
-) -> dict[str, str]:
-    """Return the first OpenFIGI hit for any of the entity's ISINs."""
+) -> tuple[dict[str, str], str | None]:
+    """Return ``(figi_hit, matched_isin)`` for the first OpenFIGI hit
+    among the entity's ISINs, or ``({}, None)`` when none match.
+
+    The matched ISIN is returned alongside the figi so downstream can
+    persist it on the Listing — without it ``_build_result`` would
+    discard the only stable equity identifier we have, and downstream
+    ETLs (notably fontem-api/load_eu_listings) would emit Listings
+    keyed by a fabricated ticker with no ISIN attached. That isin-less
+    shape is exactly the cohort the upstream loader has to retire
+    later, so we carry it through here."""
     for isin in isins:
         figi = isin_to_figi.get(isin)
         if figi:
-            return figi
-    return {}
+            return figi, isin
+    return {}, None
 
 
 def resolve_tickers(  # pylint: disable=too-many-arguments
@@ -312,11 +321,26 @@ def _build_result(
     lei_to_isins: dict[str, list[str]],
     isin_to_figi: dict[str, dict[str, str]],
 ) -> dict[str, dict[str, str | None]]:
-    """Assemble the final {lei: {symbol, exchange, ticker}} result dict.
+    """Assemble the final ``{lei: {symbol, exchange, isin, ticker}}``
+    result dict.
 
-    When OpenFIGI cannot resolve a ticker, symbol/exchange/ticker are set
-    to None instead of fabricating a name-derived ticker that will never
-    match a real exchange listing.
+    ``ticker`` is now the **bare OpenFIGI symbol** (e.g. ``"EGL"``) —
+    NOT the legacy ``f"{symbol}.{exchange}"`` composite (``"EGL.LS"``).
+    The composite was the shape the pre-d9cb5b8 fabricator produced
+    from company names, and downstream Listings keyed by it look
+    indistinguishable from real synthesized garbage when no ISIN is
+    attached. Persisting the bare symbol mirrors how every other
+    Listing-emitting loader keys (load_us_companies → ``NVDA``,
+    load_openfigi → ``EGL``) so the graph stops carrying two visually
+    distinct conventions for the same data.
+
+    ``isin`` is the FIRST ISIN from the GLEIF cohort that produced
+    an OpenFIGI hit. Persisting it here lets downstream emitters
+    (notably fontem-api/load_eu_listings) attach it to the Listing —
+    without that, Listings emitted via the JSON ingress carry
+    ``isin=NULL`` forever and trip the suspect-ticker selector the
+    OpenFIGI loader has to retire. ``None`` when OpenFIGI didn't
+    match anything (private companies, bond-only issuers, …).
     """
     result: dict[str, dict[str, str | None]] = {}
     unresolved = 0
@@ -325,16 +349,23 @@ def _build_result(
         country = entity.get("country", "")
 
         isins = lei_to_isins.get(lei, [])
-        figi = _best_figi_for_lei(isins, isin_to_figi)
+        figi, matched_isin = _best_figi_for_lei(isins, isin_to_figi)
 
         if figi.get("ticker"):
             symbol = figi["ticker"].upper().replace(" ", "")
             exchange = _normalize_exchange(figi.get("exchange_code", ""), country)
-            ticker = f"{symbol}.{exchange}"
-            result[lei] = {"symbol": symbol, "exchange": exchange, "ticker": ticker}
+            result[lei] = {
+                "symbol": symbol,
+                "exchange": exchange,
+                "isin": matched_isin,
+                "ticker": symbol,
+            }
         else:
             unresolved += 1
-            result[lei] = {"symbol": None, "exchange": None, "ticker": None}
+            result[lei] = {
+                "symbol": None, "exchange": None,
+                "isin": None, "ticker": None,
+            }
 
     if unresolved:
         logger.info("Ticker resolution: %d of %d entities unresolved (no FIGI match)",

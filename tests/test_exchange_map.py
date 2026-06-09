@@ -91,7 +91,8 @@ def test_resolve_tickers_openfigi_hit():
 
     assert result["LEI001"]["symbol"] == "ASML"
     assert result["LEI001"]["exchange"] == "AS"   # "NA" → "AS" via alias
-    assert result["LEI001"]["ticker"] == "ASML.AS"
+    assert result["LEI001"]["ticker"] == "ASML"
+    assert result["LEI001"]["isin"] == "NL0010273215"
 
 
 def test_resolve_tickers_openfigi_miss_returns_null():
@@ -113,6 +114,7 @@ def test_resolve_tickers_openfigi_miss_returns_null():
     assert result["LEI001"]["ticker"] is None
     assert result["LEI001"]["symbol"] is None
     assert result["LEI001"]["exchange"] is None
+    assert result["LEI001"]["isin"] is None
 
 
 def test_gleif_returns_isin():
@@ -198,4 +200,47 @@ def test_resolve_tickers_telefonica_gets_tef():
          patch("src.exchange_map.requests.post", return_value=openfigi_response):
         result = resolve_tickers(entities, use_openfigi=True, batch_size=10)
 
-    assert result["549300EEJH4FEPDBBR25"]["ticker"] == "TEF.MC"
+    assert result["549300EEJH4FEPDBBR25"]["ticker"] == "TEF"
+
+
+def test_resolve_tickers_returns_bare_symbol_not_dot_exchange():
+    """Pin the dot-shape ban: ``ticker`` is the bare OpenFIGI symbol
+    (``EGL``), NEVER the legacy ``{symbol}.{exchange}`` composite
+    (``EGL.LS``). The composite was the shape the pre-d9cb5b8 name
+    fabricator produced; persisting it downstream would resurrect the
+    suspect-ticker cohort even when OpenFIGI legitimately resolved
+    the entity."""
+    entities = [{"lei": "549300L6RR1203WN9F57", "name": "MOTA-ENGIL SGPS S.A.",
+                 "country": "PT"}]
+
+    gleif_response = MagicMock()
+    gleif_response.status_code = 200
+    gleif_response.json.return_value = {
+        "data": [{"attributes": {"isin": "PTMEN0AE0005"}}],
+    }
+    openfigi_response = MagicMock()
+    openfigi_response.status_code = 200
+    openfigi_response.json.return_value = [{
+        "data": [{"ticker": "EGL", "exchCode": "LS",
+                  "securityType": "Common Stock"}],
+    }]
+
+    with patch("src.exchange_map.requests.get", return_value=gleif_response), \
+         patch("src.exchange_map.requests.post", return_value=openfigi_response):
+        result = resolve_tickers(
+            entities, use_openfigi=True, batch_size=10,
+        )
+
+    res = result["549300L6RR1203WN9F57"]
+    assert res["ticker"] == "EGL", "must be the bare symbol"
+    assert "." not in res["ticker"], (
+        "ticker MUST NOT contain a dot — that's the legacy "
+        "fabricator's shape"
+    )
+    assert res["symbol"] == "EGL"
+    assert res["exchange"] == "LS"
+    assert res["isin"] == "PTMEN0AE0005", (
+        "ISIN must be plumbed through so downstream Listings carry "
+        "the canonical equity identifier; without this they land as "
+        "suspect tickers downstream"
+    )

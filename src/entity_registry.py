@@ -105,9 +105,17 @@ def build_registry(cfg: Config) -> tuple[dict[str, Any], dict[str, list[dict[str
 
         if ticker is not None:
             if ticker_count[ticker] > 1:
+                # Disambiguate same-ticker collisions across LEIs by
+                # appending a 4-char LEI fragment to the BARE symbol.
+                # Pre-fix this concatenated the exchange suffix as
+                # well (``{symbol}_{lei[-4:]}.{exchange}``) — that
+                # produced shapes indistinguishable from the legacy
+                # name-based fabricator and tripped the suspect-ticker
+                # selector downstream. Pure ``{symbol}_{frag}`` keeps
+                # the dis-collision intent without resurrecting the
+                # ``.exchange`` anti-pattern.
                 symbol = tick_info["symbol"]
-                exchange = tick_info["exchange"]
-                ticker = f"{symbol}_{lei[-4:]}.{exchange}"
+                ticker = f"{symbol}_{lei[-4:]}"
             key = ticker
             resolved += 1
         else:
@@ -118,6 +126,7 @@ def build_registry(cfg: Config) -> tuple[dict[str, Any], dict[str, list[dict[str
             "ticker": ticker,
             "symbol": tick_info.get("symbol"),
             "exchange": tick_info.get("exchange"),
+            "isin": tick_info.get("isin"),
             "name": entity["name"],
             "country": entity["country"],
             "source": "esef",
